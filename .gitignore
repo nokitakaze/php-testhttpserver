@@ -1,0 +1,5 @@
+/vendor
+/composer.lock
+/test/clover.xml
+/test/html-report
+/test/testListeningScenario_profiling.txt
