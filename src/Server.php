@@ -536,7 +536,7 @@
             }
 
             $connect->request_head_params = [];
-            foreach (explode("\r\n", $other_lines) as &$other_line) {
+            foreach (explode("\r\n", $other_lines) as $other_line) {
                 if (empty($other_line) or !preg_match('_^([A-Za-z0-9-]+):\\s*(.*)$_', $other_line, $a)) {
                     if ($this->event_raise('HeadInvalidReceived', $connect, 2) === false) {
                         // Подключение сдохло
