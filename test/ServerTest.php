@@ -20,8 +20,11 @@
          */
         static $request_invalid_connection;
 
+        protected $_current_dir = null;
+
         function setUp() {
             parent::setUp();
+            $this->_current_dir = getcwd();
             if (!is_null(self::$_server)) {
                 self::$_server->shutdown();
                 self::$_server = null;
@@ -29,6 +32,7 @@
         }
 
         function tearDown() {
+            chdir($this->_current_dir);
             if (!is_null(self::$_server)) {
                 self::$_server->shutdown();
                 self::$_server = null;
@@ -1150,6 +1154,180 @@ organization           = "Nokita Kaze"
                 escapeshellarg($filename),
                 escapeshellarg($filename_console));
             exec($wget_script);
+        }
+
+        function dataHTTPerf() {
+            return [
+                [1, 60, 5, false],
+                [1, 60, 20, true],
+                [5, 60, 5, false],
+                [5, 60, 20, true],
+                [10, 10, 20, false],
+                [10, 10, 20, true],
+                [50, 10, 20, false],
+                [50, 10, 20, true],
+                [100, 20, 20, false],
+                [100, 20, 20, true],
+            ];
+        }
+
+        /**
+         * @param integer $rate
+         * @param integer $second
+         * @param integer $timeout
+         * @param boolean $is_ssl
+         *
+         * @dataProvider dataHTTPerf
+         * @url https://media.readthedocs.org/pdf/yandextank/latest/yandextank.pdf
+         */
+        function testHTTPerf($rate, $second, $timeout, $is_ssl) {
+            $port = self::get_port();
+            $invalid_connection_count = 0;
+            $max_connection_count = 0;
+            self::$_server = new Server((object) [
+                'interface' => '0.0.0.0',
+                'port' => $port,
+                'onRequest' => function ($server, $connect) use (&$max_connection_count) {
+                    /** @var Server $server */
+                    /** @var ClientDatum $connect */
+                    $connect->server->answer($connect, 200, 'OK', 'Nyan pasu', [
+                        'Content-type' => 'text/plain;',
+                    ]);
+                    $count = 0;
+                    $reflection = new \ReflectionProperty($server, '_client_connects');
+                    $reflection->setAccessible(true);
+                    foreach ($reflection->getValue($server) as &$single_connect) {
+                        /** @var ClientDatum $single_connect */
+                        if (!is_null($single_connect) and !is_null($single_connect->client)) {
+                            $count++;
+                        }
+                    }
+                    $max_connection_count = max($max_connection_count, $count);
+
+                    $connect->status = 3;
+                },
+                'InvalidConnection' => function ($server) use (&$invalid_connection_count, &$max_connection_count) {
+                    $invalid_connection_count++;
+                    $count = 0;
+                    $reflection = new \ReflectionProperty($server, '_client_connects');
+                    $reflection->setAccessible(true);
+                    foreach ($reflection->getValue($server) as &$single_connect) {
+                        /** @var ClientDatum $single_connect */
+                        if (!is_null($single_connect) and !is_null($single_connect->client)) {
+                            $count++;
+                        }
+                    }
+                    $max_connection_count = max($max_connection_count, $count);
+                },
+            ]);
+            if ($is_ssl) {
+                self::$_server->set_option('is_ssl', true);
+                self::$_server->stream_set_ssl_option('local_cert', self::$_folder.'/crt_a3.c.crt');
+                self::$_server->stream_set_ssl_option('local_pk', self::$_folder.'/crt_a3.pem');
+                self::$_server->stream_set_ssl_option('allow_self_signed', true);
+                self::$_server->stream_set_ssl_option('verify_peer', false);
+            }
+
+            $folder = self::$_folder.'/yandex-tank-'.microtime(true);
+            mkdir($folder);
+            chdir($folder);
+            $rate = (int) $rate;
+            $number_calls = (int) ($second * $rate);
+            file_put_contents($folder.'/load.ini', sprintf('[phantom]
+address=%s:%d ;Target\'s address
+ssl=%d
+rps_schedule = const(%d, %ds) const(0, %ds) ;load scheme
+headers = [Host: %s]
+uris = /
+timeout = %ds
+instances = %d
+',
+                strtolower(gethostname()), $port,
+                $is_ssl ? 1 : 0,
+                $rate, $second, $timeout,
+                strtolower(gethostname()), $timeout, min($rate * $timeout, 200)));
+
+            $logs_directory = null;
+            $phout_log_file = null;
+
+            $filename_console = tempnam(self::$_folder, 'httperf_console_');
+            $command = sprintf('yandex-tank > %s 2>/dev/null &', escapeshellarg($filename_console));
+            self::$_server->init_listening();
+            exec($command);
+            $ts_stop = microtime(true) + $second + 60;
+            $closure = function ($server) use (&$logs_directory, &$phout_log_file, $ts_stop, $folder) {
+                $logs_directory = null;
+                if (!file_exists($folder.'/logs')) {
+                    return ($ts_stop >= microtime(true));
+                }
+                foreach (scandir($folder.'/logs') as $dir) {
+                    if (preg_match('_^[0-9]+\\-[0-9]{2,2}\\-[0-9]{2,2}_', $dir) and is_dir($folder.'/logs/'.$dir)) {
+                        $logs_directory = $folder.'/logs/'.$dir;
+                        break;
+                    }
+                }
+                if (is_null($logs_directory)) {
+                    return ($ts_stop >= microtime(true));
+                }
+                foreach (scandir($logs_directory) as $f) {
+                    if (preg_match('|^phout_.+\\.log$|', $f)) {
+                        $phout_log_file = $logs_directory.'/'.$f;
+                        break;
+                    }
+                }
+                if (!is_null($phout_log_file)) {
+                    return false;
+                }
+
+                return ($ts_stop >= microtime(true));
+            };
+            self::$_server->listen($closure);
+            // $output_console = file_get_contents($filename_console);
+            self::$_server->shutdown();
+            self::$_server = null;
+
+            $this->assertNotNull($logs_directory, 'Can not find directory with Yandex Tank\'s logs');
+            $this->assertNotNull($phout_log_file, 'Can not find phout output log within Yandex Tank\'s logs');
+            $strings = preg_split("_[\\r\\n]+_", file_get_contents($phout_log_file));
+            $http_codes = [0, 0, 0, 0, 0, 0];
+            foreach ($strings as $string) {
+                if (empty($string)) {
+                    continue;
+                }
+                list(, , , , , , , , , , , $http_code) = preg_split('_\\s+_', $string);
+                $http_code = (int) $http_code;
+                $http_codes[(int) floor($http_code / 100)]++;
+            }
+            $additional_log = '';
+            if ($invalid_connection_count > 0) {
+                $additional_log .= sprintf("\nInvalid connection count: %d", $invalid_connection_count);
+            }
+            if ($max_connection_count > 0) {
+                $additional_log .= sprintf("\nPeak established connection count: %d", $max_connection_count);
+            }
+
+            if ($rate > 5) {
+                if ($number_calls * ($is_ssl ? 0.90 : 1) <
+                    $http_codes[1] + $http_codes[2] + $http_codes[3] + $http_codes[4] + $http_codes[5]
+                ) {
+                    $this->markTestIncomplete(sprintf('Connections count mismatch. %d sent, %d expected, %d retrieved%s',
+                        $number_calls, $number_calls * ($is_ssl ? 0.90 : 1),
+                        $http_codes[1] + $http_codes[2] + $http_codes[3] + $http_codes[4] + $http_codes[5], $additional_log));
+                }
+                if ($http_codes[1] + $http_codes[4] + $http_codes[5] > ($is_ssl ? 0.075 * $number_calls : 0)) {
+                    $this->markTestIncomplete(sprintf('HTTP code: 1xx=%d, 4xx=%d, 5xx=%d%s',
+                        $http_codes[1], $http_codes[4], $http_codes[5], $additional_log));
+                }
+
+                return;
+            }
+            $this->assertGreaterThanOrEqual($number_calls * ($is_ssl ? 0.90 : 0.97),
+                $http_codes[1] + $http_codes[2] + $http_codes[3] + $http_codes[4] + $http_codes[5],
+                'Connections count mismatch'.$additional_log);
+            $this->assertLessThanOrEqual($is_ssl ? 0.05 * $number_calls : 0,
+                $http_codes[1] + $http_codes[4] + $http_codes[5],
+                sprintf('HTTP code: 1xx=%d, 4xx=%d, 5xx=%d%s', $http_codes[1], $http_codes[4], $http_codes[5], $additional_log)
+            );
         }
     }
 

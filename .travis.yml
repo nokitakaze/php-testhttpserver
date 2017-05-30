@@ -1,6 +1,7 @@
 language: php
 
 php:
+  - 5.5
   - 5.6
   - 7.0
   - 7.1
@@ -27,8 +28,13 @@ cache:
     - $HOME/.composer/cache
 
 before_install:
+  - sudo add-apt-repository ppa:yandex-load/main -y
   - sudo apt-get update --yes
-  - sudo apt-get install --yes net-tools wget
+  - sudo apt-get install --yes net-tools wget python-pip build-essential python-dev libffi-dev gfortran libssl-dev
+  - sudo -H pip install --upgrade pip
+  - sudo -H pip install --upgrade setuptools
+  - sudo -H pip install https://api.github.com/repos/yandex/yandex-tank/tarball/master
+  - sudo apt-get install phantom phantom-ssl
   - composer self-update
 
 install: composer install --no-interaction
@@ -39,6 +45,7 @@ script:
 after_script:
   - cat test/testListeningScenario_profiling.txt
   - wget https://scrutinizer-ci.com/ocular.phar
+  - if [ $(phpenv version-name) = "5.5" ]; then php ocular.phar code-coverage:upload --format=php-clover test/clover.xml --revision=$TRAVIS_COMMIT; fi
   - if [ $(phpenv version-name) = "5.6" ]; then php ocular.phar code-coverage:upload --format=php-clover test/clover.xml --revision=$TRAVIS_COMMIT; fi
   - if [ $(phpenv version-name) = "7.0" ]; then php ocular.phar code-coverage:upload --format=php-clover test/clover.xml --revision=$TRAVIS_COMMIT; fi
   - if [ $(phpenv version-name) = "7.1" ]; then php ocular.phar code-coverage:upload --format=php-clover test/clover.xml --revision=$TRAVIS_COMMIT; fi

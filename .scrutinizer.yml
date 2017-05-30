@@ -4,8 +4,8 @@ tools:
     php_analyzer: true
     php_code_coverage: true
     external_code_coverage:
-        timeout: 4900 # Only one set will be made in this time
-        runs: 3 # PHP 5.6 + PHP 7.0 + PHP 7.1
+        timeout: 4000 # Only one set will be made in this time
+        runs: 4 # PHP 5.5 + PHP 5.6 + PHP 7.0 + PHP 7.1
 
 filter:
     excluded_paths: [vendor/*, test/*]

@@ -43,8 +43,67 @@
             $settings = (object) $settings;
             self::fix_incoming_settings($settings);
             $this->_settings = $settings;
+            $this->init_ssl_settings();
+        }
+
+        function __destruct() {
+            $this->shutdown();
+        }
+
+        function shutdown() {
+            foreach ($this->_client_connects as &$connect) {
+                $this->close_connection($connect);
+            }
+            $this->_client_connects = [];
+            $this->close_connection_socket($this->_server_socket);
+            $this->_server_socket = null;
+        }
+
+        /**
+         * @param resource $connection
+         */
+        function close_connection_socket($connection) {
+            if (is_resource($connection)) {
+                stream_socket_shutdown($connection, STREAM_SHUT_RDWR);
+                fclose($connection);
+            }
+        }
+
+        /**
+         * @param object|ClientDatum $connection
+         */
+        function close_connection(&$connection) {
+            if (is_null($connection)) {
+                return;
+            }
+            $this->close_connection_socket($connection->client);
+            $connection->client = null;
+            $connection = null;
+        }
+
+        /**
+         * @return array
+         */
+        static function get_default_settings() {
+            return [
+                'interface' => '127.0.0.1',
+                'port' => 58080,
+                'server_connect_waiting_time' => 0.02,
+                'is_ssl' => false,
+                'filterIncomingConnect' => function () { return true; },
+                'server_maximum_chunk' => 300 * 1024,
+                'server_backlog' => min(255, SOMAXCONN),
+
+                'time_wait_until_first_byte' => 60,
+            ];
+        }
+
+        function init_ssl_settings() {
             $this->_stream_context = stream_context_create();
+            /** @url http://php.net/manual/ru/context.socket.php */
+            stream_context_set_option($this->_stream_context, 'socket', 'backlog', $this->_settings->server_backlog);
             if (isset($this->_settings->ssl_server_certificate_file)) {
+                // @hint Здесь специально не задаётся _settings->is_ssl
                 $this->stream_set_ssl_option('local_cert', $this->_settings->ssl_server_certificate_file);
                 $this->stream_set_ssl_option('allow_self_signed', true);
                 $this->stream_set_ssl_option('verify_peer', false);
@@ -69,55 +128,6 @@
             }
         }
 
-        function __destruct() {
-            $this->shutdown();
-        }
-
-        function shutdown() {
-            foreach ($this->_client_connects as &$connect) {
-                $this->close_connection($connect);
-            }
-            $this->_client_connects = [];
-            $this->close_connection_socket($this->_server_socket);
-        }
-
-        /**
-         * @param resource $connection
-         */
-        function close_connection_socket($connection) {
-            if (is_resource($connection)) {
-                fclose($connection);
-            }
-        }
-
-        /**
-         * @param object|ClientDatum $connection
-         */
-        function close_connection(&$connection) {
-            if (is_null($connection)) {
-                return;
-            }
-            $this->close_connection_socket($connection->client);
-            $connection->client = null;
-            $connection = null;
-        }
-
-        /**
-         * @return array
-         */
-        static function get_default_settings() {
-            return [
-                'interface' => '127.0.0.1',
-                'port' => 58080,
-                'server_sleep_if_no_connect' => 1,
-                'is_ssl' => false,
-                'filterIncomingConnect' => function () { return true; },
-                'server_maximum_chunk' => 300 * 1024,
-
-                'time_wait_until_first_byte' => 60,
-            ];
-        }
-
         /**
          * Server constructor.
          *
@@ -139,16 +149,29 @@
         }
 
         /**
-         * @codeCoverageIgnore
+         * @param callable|double $param
+         * @param callable|null   $tick
          */
-        function listen() {
+        function listen($param, $tick = null) {
             $this->init_listening();
-            while (true) {
+            if (is_callable($param)) {
+                $closure = $param;
+            } else {
+                $closure = function () use ($param) { return (microtime(true) < $param); };
+            }
+            /** @noinspection PhpMethodParametersCountMismatchInspection */
+            while ($closure($this)) {
                 $this->listen_tick();
+                if (!is_null($tick)) {
+                    $tick($this);
+                }
             }
         }
 
         function init_listening() {
+            if (!is_null($this->_server_socket)) {
+                return;
+            }
             $this->_server_socket = stream_socket_server(
                 sprintf('%s://%s:%d',
                     $this->_settings->is_ssl ? 'ssl' : 'tcp',
@@ -167,59 +190,57 @@
         }
 
         function listen_tick() {
-            $read = [$this->_server_socket];
             $write = null;
             $except = null;
-            if (stream_select($read, $write, $except, 0) === false) {
-                // @codeCoverageIgnoreStart
-                throw new Exception('Error on stream select');
-                // @codeCoverageIgnoreEnd
-            }
-            if (empty($read)) {
-                $ts_before = microtime(true);
-                $this->process_all_connected_clients();
-                $sleep = $this->_settings->server_sleep_if_no_connect - microtime(true) + $ts_before;
-                if ($sleep > 0) {
-                    usleep($sleep * 1000000);
+            $tv_sec = (int) $this->_settings->server_connect_waiting_time;
+            $tv_usec = ($this->_settings->server_connect_waiting_time - $tv_sec) * 1000000;
+            while (true) {
+                $read = [$this->_server_socket];
+                if (stream_select($read, $write, $except, $tv_sec, $tv_usec) === false) {
+                    // @codeCoverageIgnoreStart
+                    throw new Exception('Error on stream select');
+                    // @codeCoverageIgnoreEnd
+                }
+                if (empty($read)) {
+                    $this->process_all_connected_clients();
+
+                    return;
                 }
 
-                return;
+                $client = @stream_socket_accept($this->_server_socket);
+                if ($client === false) {
+                    $this->event_raise('InvalidConnection');
+                    continue;
+                }
+
+                if (stream_set_blocking($client, 0) === false) {
+                    // @codeCoverageIgnoreStart
+                    throw new Exception('Can not set socket as non blocking');
+                    // @codeCoverageIgnoreEnd
+                }
+                $connect_time = microtime(true);
+                /**
+                 * @var ClientDatum $datum
+                 */
+                $datum = new \stdClass();
+                $datum->status = 0;
+                $datum->client = $client;
+                $datum->connection_time = $connect_time;
+                $datum->blob_request = '';
+                $datum->request_head_params = [];
+                $datum->server = $this;
+                $datum->accepted_hosts = null;
+                $this->event_raise('Connect', $datum);
+                $this->_client_connects[] = $datum;
             }
-
-            $client = @stream_socket_accept($this->_server_socket);
-            if ($client === false) {
-                $this->event_raise('InvalidConnection');
-
-                // Если я не запущу process_all_connected_clients, то может быть DDoS через неправильные коннекты
-                $this->process_all_connected_clients();
-
-                return;
-            }
-
-            if (stream_set_blocking($client, 0) === false) {
-                // @codeCoverageIgnoreStart
-                throw new Exception('Can not set socket as non blocking');
-                // @codeCoverageIgnoreEnd
-            }
-            $connect_time = microtime(true);
-            /**
-             * @var ClientDatum $datum
-             */
-            $datum = new \stdClass();
-            $datum->status = 0;
-            $datum->client = $client;
-            $datum->connection_time = $connect_time;
-            $datum->blob_request = '';
-            $datum->request_head_params = [];
-            $datum->server = $this;
-            $datum->accepted_hosts = null;
-            $this->event_raise('Connect', $datum);
-            $this->_client_connects[] = $datum;
-
-            //
-            $this->process_all_connected_clients();
         }
 
+        /**
+         * @param string $key
+         * @param mixed  $value
+         *
+         * @url http://php.net/manual/ru/context.ssl.php
+         */
         function stream_set_ssl_option($key, $value) {
             stream_context_set_option($this->_stream_context, 'ssl', $key, $value);
         }
@@ -376,7 +397,7 @@
          * @return boolean
          */
         protected function receive_data_from_connected_client($connect, $time, &$buf) {
-            $buf = fread($connect->client, self::CHUNK_SIZE);
+            $buf = @fread($connect->client, self::CHUNK_SIZE);
             if (empty($buf)) {
                 $this->close_connection($connect);
 
@@ -388,7 +409,7 @@
             }
             if (strlen($buf) >= self::CHUNK_SIZE) {
                 do {
-                    $sub_buf = fread($connect->client, self::CHUNK_SIZE);
+                    $sub_buf = @fread($connect->client, self::CHUNK_SIZE);
                     $buf .= $sub_buf;
                     if (isset($this->_settings->server_maximum_chunk) and
                         (strlen($buf) >= $this->_settings->server_maximum_chunk)
@@ -630,7 +651,7 @@
             foreach ($headers as $key => &$value) {
                 $buf .= sprintf("%s: %s\r\n", $key, $value);
             }
-            fwrite($connect->client, "{$buf}\r\n{$body}");
+            @fwrite($connect->client, "{$buf}\r\n{$body}");
         }
     }
 

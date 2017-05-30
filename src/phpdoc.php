@@ -21,13 +21,13 @@
      * @property string|null    $interface
      * @property boolean        $is_ssl
      *
-     * @property double         $server_sleep_if_no_connect
-     * @property double         $server_wait_before_first_byte
+     * @property double         $server_connect_waiting_time
      * @property double         $server_maximum_chunk
+     * @property integer        $server_backlog
      *
      * @property string|null    $ssl_server_certificate_file Certificate chain file for HTTPS domain
-     * @property string|null    $ssl_server_key_file         Client pem-file
-     * @property string         $ssl_server_key_password     Password for client pem-file
+     * @property string|null    $ssl_server_key_file         Server pem-file (from crt in server_cert_file)
+     * @property string         $ssl_server_key_password     Password for server pem-file
      * @property string|null    $ssl_client_certificate_file Testing CA for client pem
      *
      * @property double         $time_wait_until_first_byte
