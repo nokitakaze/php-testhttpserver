@@ -1329,6 +1329,13 @@ instances = %d
                 sprintf('HTTP code: 1xx=%d, 4xx=%d, 5xx=%d%s', $http_codes[1], $http_codes[4], $http_codes[5], $additional_log)
             );
         }
+
+        function testGet_optionError() {
+            self::$_server = new Server((object) []);
+            for ($i = 0; $i < 20; $i++) {
+                $this->assertNull(self::$_server->get_option('key-'.mt_rand(0, 10000).'-'.microtime(true)));
+            }
+        }
     }
 
 ?>

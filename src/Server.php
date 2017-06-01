@@ -250,7 +250,7 @@
         }
 
         function get_option($key) {
-            return $this->_settings->{$key};
+            return isset($this->_settings->{$key}) ? $this->_settings->{$key} : null;
         }
 
         /**
